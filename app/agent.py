@@ -70,6 +70,8 @@ class QuizContext:
     current_url: str
     attempt_number: int = 0
     results: list = field(default_factory=list)
+    last_failure_reason: str = ""
+    last_wrong_answer: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1365,6 +1367,8 @@ class QuizSolver:
                         logger.info(f"Correct! Moving to next question: {result.next_url}")
                         context.current_url = result.next_url
                         context.attempt_number = 0
+                        context.last_failure_reason = ""
+                        context.last_wrong_answer = ""
                     else:
                         logger.info("Quiz completed successfully!")
                         break
@@ -1373,12 +1377,18 @@ class QuizSolver:
                     reason = (result.message or "").lower()
                     is_delay_timeout = "delay" in reason and "180" in reason
                     
+                    # Store failure info for retry
+                    context.last_failure_reason = result.message or "Wrong answer"
+                    context.last_wrong_answer = str(result.answer) if result.answer else ""
+                    
                     if result.next_url:
                         # Has next URL - decide whether to retry or move on
                         if is_delay_timeout:
                             logger.info(f"Delay timeout, moving to next: {result.next_url}")
                             context.current_url = result.next_url
                             context.attempt_number = 0
+                            context.last_failure_reason = ""
+                            context.last_wrong_answer = ""
                         else:
                             # Wrong but not timeout - retry
                             context.attempt_number += 1
@@ -1386,8 +1396,10 @@ class QuizSolver:
                                 logger.warning(f"Max retries reached, moving to next: {result.next_url}")
                                 context.current_url = result.next_url
                                 context.attempt_number = 0
+                                context.last_failure_reason = ""
+                                context.last_wrong_answer = ""
                             else:
-                                logger.info(f"Wrong answer, retrying (attempt {context.attempt_number + 1}/{settings.max_retries_per_question})")
+                                logger.info(f"Wrong answer '{context.last_wrong_answer}', reason: '{context.last_failure_reason}', retrying (attempt {context.attempt_number + 1}/{settings.max_retries_per_question})")
                                 context.results.pop()
                                 continue
                     else:
@@ -1400,7 +1412,7 @@ class QuizSolver:
                         if context.attempt_number >= settings.max_retries_per_question:
                             logger.warning(f"Max retries reached, no next URL, quiz ended")
                             break
-                        logger.info(f"Wrong answer, retrying (attempt {context.attempt_number + 1}/{settings.max_retries_per_question})")
+                        logger.info(f"Wrong answer '{context.last_wrong_answer}', reason: '{context.last_failure_reason}', retrying (attempt {context.attempt_number + 1}/{settings.max_retries_per_question})")
                         context.results.pop()
                         continue
 
@@ -1489,7 +1501,23 @@ class QuizSolver:
                 logger.warning(f"Guidance failed: {type(e).__name__}: {e}, continuing without it")
 
             # Build prompt with guidance and solve
-            prompt = self._build_prompt(url, page, deps, guidance)
+            # Include retry context if this is a retry attempt
+            retry_context = ""
+            if context.attempt_number > 0 and context.last_failure_reason:
+                retry_context = f"""
+⚠️ RETRY ATTEMPT {context.attempt_number + 1}/{settings.max_retries_per_question} ⚠️
+Your previous answer was WRONG:
+- Previous answer: {context.last_wrong_answer}
+- Reason for failure: {context.last_failure_reason}
+
+Please carefully reconsider and provide a DIFFERENT answer. Think about:
+- Did you misunderstand the question format?
+- Did you miss any specific requirements?
+- Is there a different interpretation of the question?
+"""
+                logger.info(f"Adding retry context to prompt: previous answer='{context.last_wrong_answer}', reason='{context.last_failure_reason}'")
+            
+            prompt = self._build_prompt(url, page, deps, guidance, retry_context)
             logger.info(f"Built prompt, length: {len(prompt)}")
 
             try:
@@ -1600,7 +1628,7 @@ Provide 3-5 bullet points on:
             logger.warning(f"Guidance agent failed: {type(e).__name__}: {e}")
             return ""
 
-    def _build_prompt(self, url: str, page: PageContent, deps: QuizDependencies, guidance: str = "") -> str:
+    def _build_prompt(self, url: str, page: PageContent, deps: QuizDependencies, guidance: str = "", retry_context: str = "") -> str:
         links_formatted = (
             "\n".join([f"  - {link}" for link in page.links])
             if page.links else "  (none)"
@@ -1614,10 +1642,16 @@ SOLUTION STRATEGY (follow this guidance):
 
 """
 
+        retry_section = ""
+        if retry_context:
+            retry_section = f"""
+{retry_context}
+"""
+
         return f"""Answer this question. DO NOT use tools unless the question requires downloading/analyzing a file.
 
 Email: {deps.email}
-{guidance_section}
+{retry_section}{guidance_section}
 QUESTION:
 {page.text_content}
 

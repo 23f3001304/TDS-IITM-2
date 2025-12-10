@@ -5,12 +5,14 @@ Main FastAPI application entry point
 import asyncio
 import time
 import uuid
+import os
 from contextlib import asynccontextmanager
 from typing import Dict, Any
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import ValidationError
@@ -26,12 +28,26 @@ from app.sandbox import sandbox
 from app.action import action
 
 
-# Configure logging
+# Configure logging - both stderr and file
+LOG_DIR = "/tmp/quiz_logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "quiz_solver.log")
+
 logger.remove()
+# Console logging
 logger.add(
     sys.stderr,
     level=settings.log_level,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+)
+# File logging - rotates at 10MB, keeps last 3 files
+logger.add(
+    LOG_FILE,
+    level="DEBUG",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+    rotation="10 MB",
+    retention=3,
+    compression="zip"
 )
 
 # Store for tracking background tasks
@@ -129,6 +145,19 @@ async def solve_quiz_task(task_id: str, email: str, secret: str, url: str):
         task_store[task_id]["status"] = "completed"
         task_store[task_id]["results"] = [r.model_dump() for r in results]
         
+        # Print quiz summary
+        total = len(results)
+        correct = sum(1 for r in results if r.correct)
+        wrong = total - correct
+        
+        logger.info("=" * 60)
+        logger.info("===== QUIZ SESSION SUMMARY =====")
+        logger.info(f"  Total Questions:   {total}")
+        logger.info(f"  Correct Answers:   {correct} ✓")
+        logger.info(f"  Wrong Answers:     {wrong} ✗")
+        logger.info(f"  Success Rate:      {(correct/total*100) if total > 0 else 0:.1f}%")
+        logger.info("=" * 60)
+        
         logger.info(f"Task {task_id}: Completed with {len(results)} results")
         
     except Exception as e:
@@ -211,6 +240,67 @@ async def health_check():
     }
 
 
+@app.get("/logs")
+async def get_logs(lines: int = 500, secret: str = ""):
+    """
+    Get recent logs from the log file.
+    
+    Args:
+        lines: Number of lines to return (default 500, max 5000)
+        secret: Authentication secret
+    """
+    if secret != settings.secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid secret"
+        )
+    
+    lines = min(lines, 5000)  # Cap at 5000 lines
+    
+    try:
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+                all_lines = f.readlines()
+                recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+                return PlainTextResponse(
+                    content="".join(recent_lines),
+                    media_type="text/plain"
+                )
+        else:
+            return PlainTextResponse(
+                content="No log file found yet.",
+                media_type="text/plain"
+            )
+    except Exception as e:
+        logger.error(f"Error reading logs: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error reading logs: {e}"
+        )
+
+
+@app.delete("/logs")
+async def clear_logs(secret: str = ""):
+    """Clear the log file."""
+    if secret != settings.secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid secret"
+        )
+    
+    try:
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, 'w') as f:
+                f.write(f"=== Logs cleared at {datetime.now().isoformat()} ===\n")
+            return {"status": "cleared"}
+        return {"status": "no logs to clear"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error clearing logs: {e}"
+        )
+
+
 @app.post("/solve-sync")
 async def solve_quiz_sync(request: QuizStartRequest):
     """
@@ -234,6 +324,19 @@ async def solve_quiz_sync(request: QuizStartRequest):
         
         agent = QuizAgent()
         results = await agent.solve_quiz(context)
+        
+        # Print quiz summary
+        total = len(results)
+        correct = sum(1 for r in results if r.correct)
+        wrong = total - correct
+        
+        logger.info("=" * 60)
+        logger.info("===== QUIZ SESSION SUMMARY =====")
+        logger.info(f"  Total Questions:   {total}")
+        logger.info(f"  Correct Answers:   {correct} ✓")
+        logger.info(f"  Wrong Answers:     {wrong} ✗")
+        logger.info(f"  Success Rate:      {(correct/total*100) if total > 0 else 0:.1f}%")
+        logger.info("=" * 60)
         
         return {
             "status": "completed",

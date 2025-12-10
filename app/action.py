@@ -61,7 +61,13 @@ class ActionModule:
             
             try:
                 data = response.json()
-                logger.info(f"Response JSON parsed: {data}")
+                logger.info("=" * 60)
+                logger.info("===== SUBMISSION RESPONSE JSON =====")
+                logger.info(f"  correct: {data.get('correct')}")
+                logger.info(f"  reason:  {data.get('reason')}")
+                logger.info(f"  url:     {data.get('url')}")
+                logger.info(f"  delay:   {data.get('delay')}")
+                logger.info("=" * 60)
                 
                 return SubmissionResponse(
                     correct=data.get("correct"),
