@@ -81,7 +81,7 @@ SYSTEM_PROMPT = """You are a quiz solver. Answer questions directly without unne
 IMPORTANT: The question is already provided to you. DO NOT scrape or download unless explicitly needed.
 
 ONLY use tools when:
-- Question asks to transcribe an AUDIO file -> transcribe_audio (or pip_install whisper then use execute_python)
+- Question asks to transcribe an AUDIO file -> transcribe_audio
 - Question asks to analyze an IMAGE -> analyze_image  
 - Question asks to analyze a VIDEO -> analyze_video
 - Question asks to extract a ZIP/archive -> extract_zip
@@ -89,7 +89,7 @@ ONLY use tools when:
 - Question asks to fetch data from an API -> make_api_request (GET only)
 
 AVAILABLE TOOLS:
-- pip_install: Install Python packages (e.g., "openai-whisper pydub ffmpeg-python")
+- pip_install: Install Python packages (e.g., "pydub ffmpeg-python")
 - run_shell_command: Run shell commands like ffmpeg, ffprobe
 - execute_python: Run Python code (can also do pip install inside)
 - download_file: Download files to local path
@@ -426,7 +426,7 @@ async def read_file_content(ctx: RunContext[QuizDependencies], url: str, max_lin
 @quiz_agent.tool
 async def transcribe_audio(ctx: RunContext[QuizDependencies], url: str) -> str:
     """
-    Download and transcribe an audio file using OpenAI Whisper.
+    Download and transcribe an audio file using Google Speech Recognition.
     Supports mp3, wav, opus, m4a, webm, flac formats.
 
     Args:
@@ -446,40 +446,50 @@ async def transcribe_audio(ctx: RunContext[QuizDependencies], url: str) -> str:
         # Convert to forward slashes to avoid Windows path escaping issues
         safe_path = local_path.replace('\\', '/')
         
-        # Use soundfile + scipy + whisper approach (proven to work)
+        # Use pydub + SpeechRecognition for transcription
         code = f'''
-import soundfile as sf
-import numpy as np
-import whisper
-from scipy import signal
+import speech_recognition as sr
+from pydub import AudioSegment
+import os
+import tempfile
 
 path = "{safe_path}"
-data, samplerate = sf.read(path)
 
-# Convert to mono if stereo
-if len(data.shape) > 1:
-    data = data.mean(axis=1)
-
-# Resample to 16kHz for whisper
-if samplerate != 16000:
-    new_len = int(len(data) * 16000 / samplerate)
-    data = signal.resample(data, new_len)
-
-data = data.astype(np.float32)
-
-# Load whisper model and transcribe
-model = whisper.load_model("base")
-result = model.transcribe(data)
-print(result["text"].strip())
+# Convert to WAV format for speech recognition
+try:
+    audio = AudioSegment.from_file(path)
+    # Convert to mono and set sample rate
+    audio = audio.set_channels(1).set_frame_rate(16000)
+    
+    # Save as WAV
+    wav_path = path.rsplit(".", 1)[0] + "_converted.wav"
+    audio.export(wav_path, format="wav")
+    
+    # Use speech recognition
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(wav_path) as source:
+        audio_data = recognizer.record(source)
+    
+    # Try Google Speech Recognition (free, no API key needed)
+    text = recognizer.recognize_google(audio_data)
+    print(text)
+    
+    # Cleanup
+    if os.path.exists(wav_path):
+        os.remove(wav_path)
+except Exception as e:
+    print(f"Error: {{e}}")
 '''
         result = await sandbox.execute_code(code, timeout=120)
         
-        if result.success and result.stdout.strip():
+        if result.success and result.stdout.strip() and not result.stdout.strip().startswith("Error:"):
             transcription = result.stdout.strip()
             logger.info(f"Transcription: {transcription}")
             return transcription
         else:
-            return f"Transcription failed: {result.stderr}"
+            error_msg = result.stderr or result.stdout
+            logger.warning(f"Speech recognition failed: {error_msg}")
+            return f"Transcription failed: {error_msg}"
             
     except Exception as e:
         logger.error(f"Audio transcription error: {e}")
@@ -681,10 +691,11 @@ except Exception as e:
     print(f"Error: {{e}}")
 '''
         elif task == "audio":
-            # Extract audio and transcribe
+            # Extract audio and transcribe using speech recognition
             code = f'''
 import subprocess
 import os
+import speech_recognition as sr
 
 try:
     # Extract audio to wav
@@ -695,14 +706,13 @@ try:
     ], capture_output=True, text=True)
     
     if result.returncode == 0 and os.path.exists(audio_path):
-        # Try whisper
-        try:
-            import whisper
-            model = whisper.load_model("base")
-            result = model.transcribe(audio_path)
-            print(result["text"].strip().lower())
-        except ImportError:
-            print("Whisper not available, audio extracted to: " + audio_path)
+        # Use speech recognition
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(audio_path) as source:
+            audio_data = recognizer.record(source)
+        text = recognizer.recognize_google(audio_data)
+        print(text.lower())
+        os.remove(audio_path)
     else:
         print(f"Audio extraction failed: {{result.stderr}}")
 except Exception as e:
@@ -1570,10 +1580,13 @@ Provide 3-5 bullet points on:
 - Key requirements/format rules
 - Potential gotchas
 """
+            logger.info("Calling guidance agent...")
             result = await guidance_agent.run(guidance_prompt)
-            return result.output
+            guidance_text = result.output
+            logger.info(f"Guidance agent returned: {guidance_text}")
+            return guidance_text
         except Exception as e:
-            logger.warning(f"Guidance agent failed: {e}")
+            logger.warning(f"Guidance agent failed: {type(e).__name__}: {e}")
             return ""
 
     def _build_prompt(self, url: str, page: PageContent, deps: QuizDependencies, guidance: str = "") -> str:

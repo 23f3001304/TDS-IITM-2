@@ -56,10 +56,12 @@ class ActionModule:
             )
             
             logger.info(f"Response status: {response.status_code}")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            logger.info(f"Response text (raw): {response.text}")
             
             try:
                 data = response.json()
-                logger.info(f"Response data: {data}")
+                logger.info(f"Response JSON parsed: {data}")
                 
                 return SubmissionResponse(
                     correct=data.get("correct"),
@@ -67,8 +69,10 @@ class ActionModule:
                     url=data.get("url"),
                     reason=data.get("reason")
                 )
-            except:
+            except Exception as parse_error:
                 # If response isn't JSON, treat as message
+                logger.warning(f"Failed to parse JSON: {parse_error}")
+                logger.info(f"Returning raw text as message")
                 return SubmissionResponse(
                     correct=None,
                     message=response.text
