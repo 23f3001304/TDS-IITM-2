@@ -100,7 +100,8 @@ AVAILABLE TOOLS:
 DO NOT use tools for:
 - Reading the question (it's already provided)
 - Scraping the current page (content is already given)
-- POSTing answers (submission is automatic)
+- POSTing answers to /submit (submission is AUTOMATIC - never call make_api_request with /submit)
+- Navigating to next questions (handled automatically)
 
 For command string questions (like "craft the command"):
 - Just construct and return the command string directly
@@ -1168,17 +1169,23 @@ async def make_api_request(
     headers: str = ""
 ) -> str:
     """
-    Make an HTTP request to an API endpoint.
+    Make an HTTP request to an API endpoint. Use ONLY for GET requests to fetch data.
+    DO NOT use this for submitting quiz answers - answers are submitted automatically.
 
     Args:
         url: API URL (can be relative)
-        method: HTTP method (GET, POST, PUT, DELETE)
+        method: HTTP method (GET only - POST/PUT/DELETE not recommended)
         body: Request body (JSON string for POST/PUT)
         headers: Optional headers as JSON string
 
     Returns:
         Response body
     """
+    # Block submission attempts through this tool
+    if '/submit' in url.lower():
+        logger.warning(f"Blocked submission attempt via make_api_request: {url}")
+        return "ERROR: Do not use make_api_request for submissions. Just return the answer and it will be submitted automatically."
+    
     if not url.startswith('http'):
         url = urljoin(ctx.deps.current_url, url)
 
@@ -1189,6 +1196,8 @@ async def make_api_request(
         return ctx.deps.url_cache[cache_key]
 
     logger.info(f"API request: {method} {url}")
+    if body:
+        logger.info(f"API request body: {body}")
 
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
@@ -1202,7 +1211,8 @@ async def make_api_request(
                 headers=req_headers
             )
 
-            logger.info(f"API response: {response.status_code}")
+            logger.info(f"API response status: {response.status_code}")
+            logger.info(f"API response body: {response.text}")
             result = response.text
             
             # Cache successful GET requests
@@ -1212,6 +1222,7 @@ async def make_api_request(
             return result
 
     except Exception as e:
+        logger.error(f"API request error: {e}")
         return f"API error: {e}"
 
 
@@ -1473,7 +1484,7 @@ class QuizSolver:
             try:
                 logger.info("Getting solution guidance...")
                 guidance = await self._get_solution_guidance(page)
-                logger.info(f"Guidance: {guidance[:200] if guidance else 'none'}")
+                logger.info(f"Guidance received ({len(guidance)} chars): {guidance}")
             except Exception as e:
                 logger.warning(f"Guidance failed: {type(e).__name__}: {e}, continuing without it")
 
