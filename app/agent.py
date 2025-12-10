@@ -1437,62 +1437,107 @@ class QuizSolver:
         url = context.current_url
         logger.info(f"Solving question: {url}")
         
-        # Fast page extraction - single attempt, no retries for speed
-        page = await vision.extract_page_content(url)
-        if not page or not page.text_content:
-            # One retry on failure
-            page = await vision.extract_page_content(url)
-        
-        if not page:
-            raise RuntimeError(f"Failed to extract page content from {url}")
-
-        logger.info(f"Page text: {page.text_content[:300]}...")
-        logger.info(f"Links: {page.links}")
-
-        deps = QuizDependencies(
-            email=context.email,
-            secret=context.secret,
-            current_url=url,
-            page_content=page
-        )
-
-        # Get guidance (fast, uses flash model)
-        guidance = await self._get_solution_guidance(page)
-        logger.info(f"Guidance: {guidance[:200] if guidance else 'none'}")
-
-        # Step 2: Build prompt with guidance and solve
-        prompt = self._build_prompt(url, page, deps, guidance)
-
+        page = None
         try:
-            result = await quiz_agent.run(prompt, deps=deps)
-            agent_answer = result.output
+            # Fast page extraction - single attempt, no retries for speed
+            page = await vision.extract_page_content(url)
+            if not page or not page.text_content:
+                # One retry on failure
+                page = await vision.extract_page_content(url)
             
-            # Post-process the answer
-            final_answer = self._postprocess_answer(agent_answer.answer, page.text_content)
+            if not page:
+                raise RuntimeError(f"Failed to extract page content from {url}")
 
-            logger.info(f"Agent result: answer={final_answer}, submission_url={agent_answer.submission_url}")
+            logger.info(f"Page text: {page.text_content[:300]}...")
+            logger.info(f"Links: {page.links}")
 
-            submission_endpoint = self._resolve_submission_url(agent_answer, page, deps)
-
-            response = await action.submit_answer(
-                endpoint=submission_endpoint,
+            deps = QuizDependencies(
                 email=context.email,
                 secret=context.secret,
-                url=url,
-                answer=final_answer
+                current_url=url,
+                page_content=page
             )
 
-            return QuizResult(
-                url=url,
-                answer=final_answer,
-                correct=response.correct,
-                message=response.message or response.reason,
-                next_url=response.url
-            )
+            # Get guidance (fast, uses flash model)
+            guidance = ""
+            try:
+                logger.info("Getting solution guidance...")
+                guidance = await self._get_solution_guidance(page)
+                logger.info(f"Guidance: {guidance[:200] if guidance else 'none'}")
+            except Exception as e:
+                logger.warning(f"Guidance failed: {type(e).__name__}: {e}, continuing without it")
 
-        except Exception as e:
-            logger.error(f"Agent failed: {e}", exc_info=True)
-            return await self._fallback_solve(context, page, deps)
+            # Build prompt with guidance and solve
+            prompt = self._build_prompt(url, page, deps, guidance)
+            logger.info(f"Built prompt, length: {len(prompt)}")
+
+            try:
+                logger.info("Running quiz agent...")
+                result = await quiz_agent.run(prompt, deps=deps)
+                logger.info(f"Quiz agent returned: {type(result)}")
+                
+                if result is None or result.output is None:
+                    logger.warning("Agent returned None, using fallback")
+                    return await self._fallback_solve(context, page, deps)
+                
+                agent_answer = result.output
+                logger.info(f"Agent answer type: {type(agent_answer)}, answer: {agent_answer.answer}")
+                
+                # Check if answer is an error string
+                if isinstance(agent_answer.answer, str) and agent_answer.answer.lower() in ['error', "'error'", '"error"']:
+                    logger.warning(f"Agent returned error answer: {agent_answer.answer}, using fallback")
+                    return await self._fallback_solve(context, page, deps)
+                
+                # Post-process the answer
+                final_answer = self._postprocess_answer(agent_answer.answer, page.text_content)
+
+                logger.info(f"Agent result: answer={final_answer}, submission_url={agent_answer.submission_url}")
+
+                submission_endpoint = self._resolve_submission_url(agent_answer, page, deps)
+
+                response = await action.submit_answer(
+                    endpoint=submission_endpoint,
+                    email=context.email,
+                    secret=context.secret,
+                    url=url,
+                    answer=final_answer
+                )
+
+                return QuizResult(
+                    url=url,
+                    answer=final_answer,
+                    correct=response.correct,
+                    message=response.message or response.reason,
+                    next_url=response.url
+                )
+
+            except Exception as e:
+                logger.error(f"Agent failed: {type(e).__name__}: {e}", exc_info=True)
+                return await self._fallback_solve(context, page, deps)
+        
+        except Exception as outer_e:
+            # Outer catch for any unhandled errors (page extraction, etc.)
+            logger.error(f"Question solving failed completely: {type(outer_e).__name__}: {outer_e}", exc_info=True)
+            # Try emergency submission
+            try:
+                parsed = urlparse(url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
+                response = await action.submit_answer(
+                    endpoint=f"{base_url}/submit",
+                    email=context.email,
+                    secret=context.secret,
+                    url=url,
+                    answer="fallback_error"
+                )
+                return QuizResult(
+                    url=url,
+                    answer="fallback_error",
+                    correct=response.correct,
+                    message=response.message or response.reason,
+                    next_url=response.url
+                )
+            except:
+                raise outer_e
 
     def _postprocess_answer(self, answer: Any, page_text: str) -> Any:
         """Post-process the answer to fix common issues."""
