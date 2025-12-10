@@ -136,7 +136,7 @@ Be CONCISE - max 5 bullet points. Focus on what matters for getting the answer R
 """
 
 _provider = GoogleProvider(api_key=settings.google_api_key)
-_model = GoogleModel("gemini-3-pro-preview", provider=_provider)  # Fast model for main solving
+_model = GoogleModel("gemini-2.5-pro", provider=_provider)  # Fast model for main solving
 _flash_model = GoogleModel("gemini-2.5-flash", provider=_provider)  # Ultra-fast for guidance
 
 # Guidance agent - lightweight, fast model, no tools
