@@ -146,8 +146,8 @@ Be CONCISE - max 5 bullet points. Focus on what matters for getting the answer R
 
 # Initialize provider and models
 _provider = GoogleProvider(api_key=settings.google_api_key)
-_model = GoogleModel("gemini-2.5-flash", provider=_provider)
-_flash_model = GoogleModel("gemini-2.5-pro", provider=_provider)
+_model = GoogleModel("gemini-2.5-pro", provider=_provider)
+_flash_model = GoogleModel("gemini-2.5-flash", provider=_provider)
 
 # Guidance agent - lightweight, fast model, no tools
 guidance_agent = Agent(
