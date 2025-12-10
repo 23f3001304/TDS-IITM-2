@@ -13,6 +13,13 @@ SYSTEM_PROMPT = """You are an expert quiz solver with extensive tools. Answer qu
 
 IMPORTANT: The question is already provided to you. DO NOT scrape or download unless explicitly needed.
 
+CRITICAL FOR SCHEMA-BASED QUESTIONS:
+- When asked to create a tool plan/JSON based on a schema file, you MUST:
+  1. Download and read the schema file FIRST
+  2. Use the EXACT field names from the schema (e.g., if schema says "name", use "name" NOT "tool")
+  3. Use the EXACT argument structure (e.g., if schema shows args as array, use array format)
+  4. Match the schema PRECISELY - don't improvise or use your own format
+
 CORE TOOLS (use only when needed):
 - execute_python: Run Python code for complex calculations, data analysis
 - download_file: Download files to local path  
@@ -108,35 +115,39 @@ ANSWER FORMAT:
 - Commands: exact string without extra quotes
 - Numbers: just the number
 - Text: exactly as requested
-- JSON: compact format
+- JSON: compact format, matching the EXACT schema structure provided
 
 PROBLEM-SOLVING APPROACH:
 1. Read the question carefully - identify what's being asked
-2. Determine if you need tools or can answer directly
-3. If tools needed, use the most specific tool available
-4. For complex problems, break into steps
-5. For encoded data, try analyze_encoding first
-6. For sequence problems, use find_pattern
-7. For math problems, use do_math or solve_equation
+2. If question references a schema/config file, DOWNLOAD AND READ IT FIRST
+3. For JSON output, match the schema EXACTLY (field names, structure, types)
+4. Determine if you need tools or can answer directly
+5. For complex problems, break into steps
+6. For encoded data, try analyze_encoding first
+7. For sequence problems, use find_pattern
+8. For math problems, use do_math or solve_equation
 """
 
 GUIDANCE_PROMPT = """You are a quiz solution strategist. Analyze the question and provide a BRIEF solution strategy.
 
 Given a quiz question, identify:
-1. What TYPE of problem is this? (command construction, data processing, API call, calculation, etc.)
+1. What TYPE of problem is this? (command construction, data processing, API call, calculation, JSON generation, etc.)
 2. What TOOLS are needed? (download_file, execute_python, transcribe_audio, etc.)
 3. What are the KEY REQUIREMENTS? (specific format, normalization rules, exact output format)
-4. Any GOTCHAS to watch for? (date formats, column name mapping, case sensitivity)
+4. Any GOTCHAS to watch for? (date formats, column name mapping, case sensitivity, JSON field names)
 
-If the question references a schema or config file, note that it MUST be downloaded and examined first.
+CRITICAL FOR SCHEMA-BASED QUESTIONS:
+- If the question mentions a schema file (like tools.json, config.json), emphasize that it MUST be read first
+- The output JSON must use EXACTLY the field names from the schema (e.g., if schema has "name", don't use "tool")
+- Match the schema's argument structure precisely
 
 Be CONCISE - max 5 bullet points. Focus on what matters for getting the answer RIGHT.
 """
 
 # Initialize provider and models
 _provider = GoogleProvider(api_key=settings.google_api_key)
-_model = GoogleModel("gemini-2.5-pro", provider=_provider)
-_flash_model = GoogleModel("gemini-2.5-flash", provider=_provider)
+_model = GoogleModel("gemini-2.5-flash", provider=_provider)
+_flash_model = GoogleModel("gemini-2.5-pro", provider=_provider)
 
 # Guidance agent - lightweight, fast model, no tools
 guidance_agent = Agent(

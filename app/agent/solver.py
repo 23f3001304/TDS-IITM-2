@@ -160,14 +160,22 @@ class QuizSolver:
             retry_context = ""
             if context.attempt_number > 0 and context.last_failure_reason:
                 retry_context = f"""
-⚠️ RETRY ATTEMPT {context.attempt_number + 1}/{settings.max_retries_per_question} ⚠️
+╔══════════════════════════════════════════════════════════════════╗
+║  ⚠️ RETRY ATTEMPT {context.attempt_number + 1}/{settings.max_retries_per_question} - YOUR PREVIOUS ANSWER WAS WRONG ⚠️  ║
+╚══════════════════════════════════════════════════════════════════╝
 
-YOUR PREVIOUS ANSWER WAS REJECTED:
-Answer submitted: {context.last_wrong_answer}
-Server response: {context.last_failure_reason}
+YOUR REJECTED ANSWER:
+{context.last_wrong_answer}
 
-Analyze the server feedback carefully and fix your answer accordingly.
-You MUST provide a DIFFERENT answer this time.
+SERVER FEEDBACK:
+{context.last_failure_reason}
+
+CRITICAL INSTRUCTIONS FOR THIS RETRY:
+1. DO NOT submit the same answer again - it was already rejected
+2. Re-read any schema/config files and match their EXACT format
+3. Check field names carefully (e.g., "name" vs "tool", "args" structure)
+4. If server says format is wrong, examine the schema and use EXACTLY what it shows
+5. Your new answer MUST be different from the rejected one above
 """
                 logger.info(f"Adding retry context to prompt: previous answer='{context.last_wrong_answer}', reason='{context.last_failure_reason}'")
             
@@ -176,7 +184,13 @@ You MUST provide a DIFFERENT answer this time.
 
             try:
                 logger.info("Running quiz agent...")
-                result = await quiz_agent.run(prompt, deps=deps)
+                import traceback
+                try:
+                    result = await quiz_agent.run(prompt, deps=deps)
+                except Exception as inner_e:
+                    logger.error(f"INNER EXCEPTION: {type(inner_e).__name__}: {inner_e}")
+                    logger.error(f"INNER TRACEBACK:\n{traceback.format_exc()}")
+                    raise
                 logger.info(f"Quiz agent returned: {type(result)}")
                 
                 if result is None or result.output is None:
@@ -189,7 +203,7 @@ You MUST provide a DIFFERENT answer this time.
                 if isinstance(agent_answer.answer, str) and agent_answer.answer.lower() in ['error', "'error'", '"error"']:
                     logger.warning(f"Agent returned error answer: {agent_answer.answer}, using fallback")
                     return await self._fallback_solve(context, page, deps)
-                
+
                 final_answer = self._postprocess_answer(agent_answer.answer, page.text_content)
 
                 logger.info(f"Agent result: answer={final_answer}, submission_url={agent_answer.submission_url}")
@@ -211,6 +225,11 @@ You MUST provide a DIFFERENT answer this time.
                     message=response.message or response.reason,
                     next_url=response.url
                 )
+
+            except KeyError as ke:
+                logger.error(f"KeyError in agent run: {ke}")
+                logger.exception("Full KeyError traceback:")
+                return await self._fallback_solve(context, page, deps)
 
             except Exception as e:
                 logger.error(f"Agent failed: {type(e).__name__}: {e}", exc_info=True)

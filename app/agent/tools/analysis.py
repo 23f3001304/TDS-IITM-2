@@ -309,7 +309,7 @@ def calculate_statistics(ctx: RunContext[QuizDependencies], data: str) -> str:
 
 
 @quiz_agent.tool
-def solve_equation(ctx: RunContext[QuizDependencies], equation: str, variable: str = "x") -> str:
+async def solve_equation(ctx: RunContext[QuizDependencies], equation: str, variable: str = "x") -> str:
     """
     Solve simple algebraic equations.
 
@@ -347,7 +347,7 @@ for sol in solutions:
 '''
     
     logger.info(f"Solving equation: {equation}")
-    result = sandbox.run_sync(code, timeout=30)
+    result = await sandbox.execute_code(code, timeout=30)
     
     if result.success:
         return result.stdout.strip()
