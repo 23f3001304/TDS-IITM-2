@@ -26,6 +26,9 @@ pytesseract>=0.3.10
 # Video Processing
 ffmpeg-python>=0.2.0
 
+# Symbolic Math
+sympy>=1.12
+
 # Utilities
 python-dotenv>=1.0.0
 loguru>=0.7.0
