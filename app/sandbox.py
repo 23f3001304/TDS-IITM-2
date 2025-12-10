@@ -45,29 +45,40 @@ class ExecutionSandbox:
             
             logger.info(f"Executing script: {script_path}")
             
-            # Execute in subprocess
+            # Execute in subprocess with proper encoding
             result = subprocess.run(
-                ['python', str(script_path)],
+                ['python', '-u', str(script_path)],
                 capture_output=True,
-                text=True,
                 timeout=timeout,
                 cwd=str(self.temp_dir),
                 env={
                     **os.environ,
                     'PYTHONIOENCODING': 'utf-8',
+                    'PYTHONUTF8': '1',
                     'TEMP_DIR': str(self.temp_dir),
                 }
             )
             
+            # Decode output with utf-8, fallback to latin-1
+            try:
+                stdout = result.stdout.decode('utf-8') if result.stdout else ""
+            except UnicodeDecodeError:
+                stdout = result.stdout.decode('latin-1', errors='replace') if result.stdout else ""
+            
+            try:
+                stderr = result.stderr.decode('utf-8') if result.stderr else ""
+            except UnicodeDecodeError:
+                stderr = result.stderr.decode('latin-1', errors='replace') if result.stderr else ""
+            
             logger.info(f"Execution result - return_code: {result.returncode}")
-            logger.info(f"stdout: {result.stdout[:500] if result.stdout else '(empty)'}")
-            if result.stderr:
-                logger.warning(f"stderr: {result.stderr[:500]}")
+            logger.info(f"stdout: {stdout[:500] if stdout else '(empty)'}")
+            if stderr:
+                logger.warning(f"stderr: {stderr[:500]}")
             
             return CodeExecutionResult(
                 success=result.returncode == 0,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                stdout=stdout,
+                stderr=stderr,
                 return_code=result.returncode,
                 timed_out=False
             )

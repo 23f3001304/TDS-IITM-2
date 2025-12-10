@@ -15,7 +15,7 @@ class ActionModule:
     """
     
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=30, follow_redirects=True)
+        self.client = httpx.AsyncClient(timeout=60, follow_redirects=True)
     
     async def submit_answer(
         self,

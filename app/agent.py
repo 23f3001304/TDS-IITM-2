@@ -44,10 +44,14 @@ class QuizDependencies:
     current_url: str
     page_content: PageContent
     base_url: str = ""
+    url_cache: dict = field(default_factory=dict)  # Cache for scraped URLs
 
     def __post_init__(self):
         parsed = urlparse(self.current_url)
         self.base_url = f"{parsed.scheme}://{parsed.netloc}"
+        # Pre-cache current page content
+        if self.page_content and self.page_content.text_content:
+            self.url_cache[self.current_url] = self.page_content.text_content
 
 
 class QuizAnswer(BaseModel):
@@ -64,87 +68,92 @@ class QuizContext:
     email: str
     secret: str
     current_url: str
-    start_time: float
     attempt_number: int = 0
     results: list = field(default_factory=list)
-
-    @property
-    def elapsed_seconds(self) -> float:
-        return time.time() - self.start_time
-
-    @property
-    def remaining_seconds(self) -> float:
-        return settings.quiz_timeout_seconds - self.elapsed_seconds
-
-    @property
-    def is_timed_out(self) -> bool:
-        return self.remaining_seconds <= 0
 
 
 # ---------------------------------------------------------------------------
 # Agent Configuration
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a Senior Data Engineer solving quiz questions. You have access to many tools.
+SYSTEM_PROMPT = """You are a quiz solver. Answer questions directly without unnecessary tool calls.
 
-CRITICAL RULES:
-1. ONLY scrape URLs from the "Links on Page" list. DO NOT guess URLs.
-2. Read the question VERY carefully - pay attention to exact wording.
-3. If a question mentions a file, download and analyze it properly.
+IMPORTANT: The question is already provided to you. DO NOT scrape or download unless explicitly needed.
+
+ONLY use tools when:
+- Question asks to transcribe an AUDIO file -> transcribe_audio (or pip_install whisper then use execute_python)
+- Question asks to analyze an IMAGE -> analyze_image  
+- Question asks to analyze a VIDEO -> analyze_video
+- Question asks to extract a ZIP/archive -> extract_zip
+- Question asks to analyze CSV/data -> download_file + execute_python
+- Question asks to fetch data from an API -> make_api_request (GET only)
 
 AVAILABLE TOOLS:
-Core:
-- scrape_url: Fetch content from a URL (handles JS-rendered pages)
-- execute_python: Run Python code for complex data analysis
-- download_file: Download files (CSV, JSON, Excel, PDF, etc.)
-- read_file_content: Preview file content before full analysis
-- get_page_links / get_page_text: Access current page data
+- pip_install: Install Python packages (e.g., "openai-whisper pydub ffmpeg-python")
+- run_shell_command: Run shell commands like ffmpeg, ffprobe
+- execute_python: Run Python code (can also do pip install inside)
+- download_file: Download files to local path
+- transcribe_audio: Transcribe audio files
+- analyze_image: OCR or analyze images
+- extract_zip: Extract ZIP files
 
-Hash & Encoding:
-- compute_hash: Compute MD5, SHA1, SHA256 hash of text
-- encode_decode: Base64/URL encode/decode operations
+DO NOT use tools for:
+- Reading the question (it's already provided)
+- Scraping the current page (content is already given)
+- POSTing answers (submission is automatic)
 
-Text Processing:
-- extract_with_regex: Extract data using regex patterns
-- extract_numbers: Extract all numbers from text
-- count_occurrences: Count pattern occurrences in text
-- parse_json: Parse and query JSON data
+For command string questions (like "craft the command"):
+- Just construct and return the command string directly
+- Replace <your email> with the actual email provided
+- Do NOT actually execute the command
 
-Math & Data:
-- do_math: Perform mathematical calculations
-- analyze_csv_data: Quick CSV analysis without Python code
+CSV/JSON NORMALIZATION:
+- snake_case means: lowercase, replace spaces with underscore, then strip extra chars
+  e.g., "Joined Date" -> "joined_date", "ID" -> "id", "userName" -> "user_name"
+- BUT if target keys are specified (e.g., id, name, joined, value), map to EXACTLY those keys
+- For dates: use ISO-8601 format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+- For integers: strip whitespace/commas, convert to int
+- Use: import re; re.sub(r'[^a-z0-9]+', '_', col.lower()).strip('_') for snake_case
+- If column like "Joined Date" maps to target "joined", just use "joined"
 
-Other:
-- make_api_request: Make HTTP GET/POST requests
-- get_date_info: Parse and manipulate dates
-- compute_email_code: Compute code based on email hash
+ANSWER FORMAT:
+- Transcriptions: lowercase with spaces, include any numbers spoken
+- Commands: exact string without extra quotes
+- Numbers: just the number
+- Text: exactly as requested
+- JSON: compact format, no extra whitespace
+"""
 
-STRATEGY:
-1. Understand the question completely
-2. Identify the submission URL from links (look for 'submit')
-3. Choose the right tool(s) for the task
-4. Double-check your answer matches what was asked (COUNT vs SUM, etc.)
-5. Return answer and complete submission URL
+GUIDANCE_PROMPT = """You are a quiz solution strategist. Analyze the question and provide a BRIEF solution strategy.
 
-COMMON PATTERNS:
-- "sum of values above X" -> filter > X, then SUM
-- "count of items where" -> filter, then COUNT
-- "hash of" -> use compute_hash tool
-- "extract/find pattern" -> use extract_with_regex
-- "scrape page for secret" -> scrape_url then extract data
+Given a quiz question, identify:
+1. What TYPE of problem is this? (command construction, data processing, API call, calculation, etc.)
+2. What TOOLS are needed? (download_file, execute_python, transcribe_audio, etc.)
+3. What are the KEY REQUIREMENTS? (specific format, normalization rules, exact output format)
+4. Any GOTCHAS to watch for? (date formats, column name mapping, case sensitivity)
+
+Be CONCISE - max 5 bullet points. Focus on what matters for getting the answer RIGHT.
 """
 
 _provider = GoogleProvider(api_key=settings.google_api_key)
-_model = GoogleModel("gemini-3-pro-preview", provider=_provider)
+_model = GoogleModel("gemini-3-pro-preview", provider=_provider)  # Fast model for main solving
+_flash_model = GoogleModel("gemini-2.5-flash", provider=_provider)  # Ultra-fast for guidance
+
+# Guidance agent - lightweight, fast model, no tools
+guidance_agent = Agent(
+    model=_flash_model,
+    output_type=str,
+    system_prompt=GUIDANCE_PROMPT,
+    retries=1,
+)
 
 quiz_agent = Agent(
     model=_model,
     deps_type=QuizDependencies,
     output_type=QuizAnswer,
     system_prompt=SYSTEM_PROMPT,
-    retries=3,
+    retries=2,
 )
-
 
 # ---------------------------------------------------------------------------
 # Core Tools
@@ -164,14 +173,28 @@ async def scrape_url(ctx: RunContext[QuizDependencies], url: str) -> str:
     if not url.startswith('http'):
         url = urljoin(ctx.deps.current_url, url)
 
+    # Check cache first
+    if url in ctx.deps.url_cache:
+        logger.info(f"Using cached content for: {url}")
+        return ctx.deps.url_cache[url]
+
     logger.info(f"Scraping URL: {url}")
 
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.get(url)
             response.raise_for_status()
+            
+            content_type = response.headers.get('content-type', '').lower()
+            raw_text = response.text
+            
+            # For JSON/API responses, return raw content (don't use Selenium)
+            if 'json' in content_type or url.endswith('.json') or raw_text.strip().startswith(('{', '[')):
+                logger.info(f"JSON response ({len(raw_text)} chars): {raw_text[:200]}...")
+                ctx.deps.url_cache[url] = raw_text
+                return raw_text
 
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(raw_text, 'html.parser')
 
             # Remove script and style elements
             for element in soup(['script', 'style', 'noscript']):
@@ -179,21 +202,25 @@ async def scrape_url(ctx: RunContext[QuizDependencies], url: str) -> str:
 
             text = soup.get_text(separator='\n', strip=True)
 
-            # If content is too short, might be JS-rendered
-            if len(text) < 50:
+            # Only use Selenium for HTML pages that appear JS-rendered (not for API/JSON)
+            if len(text) < 50 and '<html' in raw_text.lower():
                 logger.info(f"Content too short ({len(text)} chars), trying Selenium")
                 page = await vision.extract_page_content(url)
                 text = page.text_content
 
-            logger.info(f"Scraped {len(text)} chars: {text[:300]}...")
-            return text if text else "Page returned no text content"
+            logger.info(f"Scraped {len(text)} chars: {text[:200]}...")
+            result = text if text else raw_text
+            ctx.deps.url_cache[url] = result
+            return result
 
     except Exception as e:
         logger.error(f"Failed to scrape {url}: {e}")
         try:
             logger.info("Trying Selenium fallback")
             page = await vision.extract_page_content(url)
-            return page.text_content if page.text_content else "Error: Page has no content"
+            result = page.text_content if page.text_content else "Error: Page has no content"
+            ctx.deps.url_cache[url] = result
+            return result
         except Exception as e2:
             return f"Error scraping URL: {e}. Selenium fallback: {e2}"
 
@@ -203,6 +230,7 @@ async def execute_python(ctx: RunContext[QuizDependencies], code: str) -> str:
     """
     Execute Python code and return the output. Use for complex data analysis.
     Available libraries: pandas, numpy, scipy, json, csv, re, math, statistics.
+    You can also use 'pip install' within the code if needed.
     The code MUST print the final answer.
 
     Args:
@@ -212,7 +240,7 @@ async def execute_python(ctx: RunContext[QuizDependencies], code: str) -> str:
         The stdout output from the code
     """
     logger.info(f"Executing Python code:\n{code}")
-    result = await sandbox.execute_code(code)
+    result = await sandbox.execute_code(code, timeout=120)  # Longer timeout for pip installs
 
     if result.success:
         output = result.stdout.strip()
@@ -221,6 +249,73 @@ async def execute_python(ctx: RunContext[QuizDependencies], code: str) -> str:
     else:
         logger.warning(f"Code failed: {result.stderr}")
         return f"Error: {result.stderr}"
+
+
+@quiz_agent.tool
+async def pip_install(ctx: RunContext[QuizDependencies], packages: str) -> str:
+    """
+    Install Python packages using pip.
+
+    Args:
+        packages: Space-separated list of packages to install (e.g., "openai-whisper pydub")
+
+    Returns:
+        Installation result
+    """
+    logger.info(f"Installing packages: {packages}")
+    
+    code = f'''
+import subprocess
+import sys
+
+packages = "{packages}".split()
+for pkg in packages:
+    print(f"Installing {{pkg}}...")
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg], 
+                          capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Failed to install {{pkg}}: {{result.stderr}}")
+    else:
+        print(f"Installed {{pkg}}")
+print("Done!")
+'''
+    
+    result = await sandbox.execute_code(code, timeout=300)  # 5 min timeout for installs
+    
+    if result.success:
+        return result.stdout.strip()
+    else:
+        return f"Installation failed: {result.stderr}"
+
+
+@quiz_agent.tool
+async def run_shell_command(ctx: RunContext[QuizDependencies], command: str) -> str:
+    """
+    Run a shell command (useful for ffmpeg, ffprobe, etc.).
+
+    Args:
+        command: Shell command to run
+
+    Returns:
+        Command output
+    """
+    logger.info(f"Running shell command: {command}")
+    
+    code = f'''
+import subprocess
+result = subprocess.run({repr(command)}, shell=True, capture_output=True, text=True)
+print(result.stdout)
+if result.stderr:
+    print("STDERR:", result.stderr)
+print("Return code:", result.returncode)
+'''
+    
+    result = await sandbox.execute_code(code, timeout=120)
+    
+    if result.success:
+        return result.stdout.strip()
+    else:
+        return f"Command failed: {result.stderr}"
 
 
 @quiz_agent.tool
@@ -251,44 +346,482 @@ async def download_file(ctx: RunContext[QuizDependencies], url: str) -> str:
 @quiz_agent.tool
 async def read_file_content(ctx: RunContext[QuizDependencies], url: str, max_lines: int = 30) -> str:
     """
-    Preview file content from a URL. Returns first lines to understand format.
+    Preview file content from a URL or local path. Returns first lines to understand format.
 
     Args:
-        url: URL of the file to read
+        url: URL of the file to read OR local file path
         max_lines: Maximum number of lines to return (default 30)
 
     Returns:
         File preview with line count
     """
+    # Handle local file paths
+    if not url.startswith('http'):
+        # Check if it's a local path
+        from pathlib import Path
+        local_path = Path(url)
+        if local_path.exists():
+            logger.info(f"Reading local file: {url}")
+            try:
+                with open(local_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+            except Exception as e:
+                logger.error(f"Failed to read local file {url}: {e}")
+                return f"Error reading local file: {e}"
+        else:
+            # Try as relative URL
+            url = urljoin(ctx.deps.current_url, url)
+            logger.info(f"Reading file preview: {url}")
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    content = response.text
+            except Exception as e:
+                logger.error(f"Failed to read {url}: {e}")
+                return f"Error reading file: {e}"
+    else:
+        # Check cache first
+        cache_key = f"file:{url}"
+        if cache_key in ctx.deps.url_cache:
+            logger.info(f"Using cached file content for: {url}")
+            content = ctx.deps.url_cache[cache_key]
+        else:
+            logger.info(f"Reading file preview: {url}")
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    content = response.text
+                    ctx.deps.url_cache[cache_key] = content
+            except Exception as e:
+                logger.error(f"Failed to read {url}: {e}")
+                return f"Error reading file: {e}"
+
+    try:
+        lines = content.split('\n')
+        total_lines = len(lines)
+        preview = '\n'.join(lines[:max_lines])
+
+        # Try to detect file type
+        file_type = "unknown"
+        if url.endswith('.csv') or ',' in lines[0]:
+            file_type = "CSV"
+        elif url.endswith('.json') or content.strip().startswith(('{', '[')):
+            file_type = "JSON"
+        elif url.endswith('.txt'):
+            file_type = "TEXT"
+
+        logger.info(f"File preview: {file_type}, {total_lines} lines")
+        return f"File type: {file_type}\nTotal lines: {total_lines}\nFirst {max_lines} lines:\n{preview}"
+    except Exception as e:
+        logger.error(f"Failed to process {url}: {e}")
+        return f"Error processing file: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Media and Archive Tools
+# ---------------------------------------------------------------------------
+
+@quiz_agent.tool
+async def transcribe_audio(ctx: RunContext[QuizDependencies], url: str) -> str:
+    """
+    Download and transcribe an audio file using OpenAI Whisper.
+    Supports mp3, wav, opus, m4a, webm, flac formats.
+
+    Args:
+        url: URL of the audio file to transcribe
+
+    Returns:
+        Transcribed text from the audio
+    """
     if not url.startswith('http'):
         url = urljoin(ctx.deps.current_url, url)
 
-    logger.info(f"Reading file preview: {url}")
+    logger.info(f"Transcribing audio: {url}")
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        # Download the audio file
+        local_path = await sandbox.download_file(url)
+        # Convert to forward slashes to avoid Windows path escaping issues
+        safe_path = local_path.replace('\\', '/')
+        
+        # Use soundfile + scipy + whisper approach (proven to work)
+        code = f'''
+import soundfile as sf
+import numpy as np
+import whisper
+from scipy import signal
 
-            content = response.text
-            lines = content.split('\n')
-            total_lines = len(lines)
-            preview = '\n'.join(lines[:max_lines])
+path = "{safe_path}"
+data, samplerate = sf.read(path)
 
-            # Try to detect file type
-            file_type = "unknown"
-            if url.endswith('.csv') or ',' in lines[0]:
-                file_type = "CSV"
-            elif url.endswith('.json') or content.strip().startswith(('{', '[')):
-                file_type = "JSON"
-            elif url.endswith('.txt'):
-                file_type = "TEXT"
+# Convert to mono if stereo
+if len(data.shape) > 1:
+    data = data.mean(axis=1)
 
-            logger.info(f"File preview: {file_type}, {total_lines} lines")
-            return f"File type: {file_type}\nTotal lines: {total_lines}\nFirst {max_lines} lines:\n{preview}"
+# Resample to 16kHz for whisper
+if samplerate != 16000:
+    new_len = int(len(data) * 16000 / samplerate)
+    data = signal.resample(data, new_len)
+
+data = data.astype(np.float32)
+
+# Load whisper model and transcribe
+model = whisper.load_model("base")
+result = model.transcribe(data)
+print(result["text"].strip())
+'''
+        result = await sandbox.execute_code(code, timeout=120)
+        
+        if result.success and result.stdout.strip():
+            transcription = result.stdout.strip()
+            logger.info(f"Transcription: {transcription}")
+            return transcription
+        else:
+            return f"Transcription failed: {result.stderr}"
+            
     except Exception as e:
-        logger.error(f"Failed to read {url}: {e}")
-        return f"Error reading file: {e}"
+        logger.error(f"Audio transcription error: {e}")
+        return f"Error transcribing audio: {e}"
+
+
+@quiz_agent.tool
+async def analyze_image(ctx: RunContext[QuizDependencies], url: str, task: str = "describe") -> str:
+    """
+    Download and analyze an image. Can extract text (OCR), describe content, or detect objects.
+
+    Args:
+        url: URL of the image file
+        task: One of "ocr" (extract text), "describe" (describe image), "detect" (detect objects)
+
+    Returns:
+        Analysis result based on task
+    """
+    if not url.startswith('http'):
+        url = urljoin(ctx.deps.current_url, url)
+
+    logger.info(f"Analyzing image ({task}): {url}")
+
+    try:
+        local_path = await sandbox.download_file(url)
+        
+        if task == "ocr":
+            code = f'''
+import pytesseract
+from PIL import Image
+
+try:
+    img = Image.open("{local_path}")
+    text = pytesseract.image_to_string(img)
+    print(text.strip())
+except Exception as e:
+    print(f"OCR Error: {{e}}")
+'''
+        elif task == "describe":
+            code = f'''
+from PIL import Image
+import os
+
+try:
+    img = Image.open("{local_path}")
+    width, height = img.size
+    mode = img.mode
+    format_type = img.format
+    print(f"Image: {{width}}x{{height}}, mode={{mode}}, format={{format_type}}")
+    
+    # Try to get more info
+    if hasattr(img, 'info'):
+        for k, v in img.info.items():
+            if isinstance(v, (str, int, float)):
+                print(f"{{k}}: {{v}}")
+except Exception as e:
+    print(f"Error: {{e}}")
+'''
+        else:  # detect
+            code = f'''
+from PIL import Image
+
+try:
+    img = Image.open("{local_path}")
+    # Basic analysis
+    colors = img.getcolors(maxcolors=10000)
+    if colors:
+        colors = sorted(colors, reverse=True)[:10]
+        print("Top colors (count, rgba):")
+        for count, color in colors:
+            print(f"  {{count}}: {{color}}")
+except Exception as e:
+    print(f"Error: {{e}}")
+'''
+        
+        result = await sandbox.execute_code(code, timeout=60)
+        
+        if result.success:
+            return result.stdout.strip() or "No output from image analysis"
+        else:
+            return f"Image analysis failed: {result.stderr}"
+            
+    except Exception as e:
+        logger.error(f"Image analysis error: {e}")
+        return f"Error analyzing image: {e}"
+
+
+@quiz_agent.tool
+async def extract_zip(ctx: RunContext[QuizDependencies], url: str) -> str:
+    """
+    Download and extract a ZIP file, returning the list of contents.
+
+    Args:
+        url: URL of the ZIP file
+
+    Returns:
+        List of files in the archive and their contents if text-based
+    """
+    if not url.startswith('http'):
+        url = urljoin(ctx.deps.current_url, url)
+
+    logger.info(f"Extracting ZIP: {url}")
+
+    try:
+        local_path = await sandbox.download_file(url)
+        
+        code = f'''
+import zipfile
+import os
+
+try:
+    with zipfile.ZipFile("{local_path}", 'r') as zf:
+        print("=== ZIP Contents ===")
+        for name in zf.namelist():
+            info = zf.getinfo(name)
+            print(f"{{name}} ({{info.file_size}} bytes)")
+        
+        print("\\n=== File Contents ===")
+        for name in zf.namelist():
+            if not name.endswith('/'):  # Skip directories
+                try:
+                    content = zf.read(name)
+                    # Try to decode as text
+                    try:
+                        text = content.decode('utf-8')
+                        print(f"\\n--- {{name}} ---")
+                        print(text[:2000])  # First 2000 chars
+                        if len(text) > 2000:
+                            print("... (truncated)")
+                    except:
+                        print(f"\\n--- {{name}} --- (binary file, {{len(content)}} bytes)")
+                except Exception as e:
+                    print(f"Error reading {{name}}: {{e}}")
+except Exception as e:
+    print(f"ZIP Error: {{e}}")
+'''
+        
+        result = await sandbox.execute_code(code, timeout=60)
+        
+        if result.success:
+            return result.stdout.strip() or "Empty ZIP file"
+        else:
+            return f"ZIP extraction failed: {result.stderr}"
+            
+    except Exception as e:
+        logger.error(f"ZIP extraction error: {e}")
+        return f"Error extracting ZIP: {e}"
+
+
+@quiz_agent.tool
+async def analyze_video(ctx: RunContext[QuizDependencies], url: str, task: str = "info") -> str:
+    """
+    Download and analyze a video file. Can extract info, frames, or audio.
+
+    Args:
+        url: URL of the video file
+        task: One of "info" (get metadata), "frames" (extract key frames), "audio" (extract and transcribe audio)
+
+    Returns:
+        Analysis result based on task
+    """
+    if not url.startswith('http'):
+        url = urljoin(ctx.deps.current_url, url)
+
+    logger.info(f"Analyzing video ({task}): {url}")
+
+    try:
+        local_path = await sandbox.download_file(url)
+        
+        if task == "info":
+            code = f'''
+import subprocess
+import json
+
+try:
+    # Use ffprobe to get video info
+    result = subprocess.run([
+        'ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams',
+        "{local_path}"
+    ], capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        fmt = data.get('format', {{}})
+        print(f"Duration: {{fmt.get('duration', 'unknown')}} seconds")
+        print(f"Format: {{fmt.get('format_name', 'unknown')}}")
+        print(f"Size: {{fmt.get('size', 'unknown')}} bytes")
+        
+        for stream in data.get('streams', []):
+            codec_type = stream.get('codec_type', 'unknown')
+            codec_name = stream.get('codec_name', 'unknown')
+            if codec_type == 'video':
+                print(f"Video: {{stream.get('width')}}x{{stream.get('height')}}, {{codec_name}}")
+            elif codec_type == 'audio':
+                print(f"Audio: {{codec_name}}, {{stream.get('sample_rate')}} Hz")
+    else:
+        print(f"ffprobe error: {{result.stderr}}")
+except Exception as e:
+    print(f"Error: {{e}}")
+'''
+        elif task == "audio":
+            # Extract audio and transcribe
+            code = f'''
+import subprocess
+import os
+
+try:
+    # Extract audio to wav
+    audio_path = "{local_path}.wav"
+    result = subprocess.run([
+        'ffmpeg', '-i', "{local_path}", '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+        audio_path, '-y'
+    ], capture_output=True, text=True)
+    
+    if result.returncode == 0 and os.path.exists(audio_path):
+        # Try whisper
+        try:
+            import whisper
+            model = whisper.load_model("base")
+            result = model.transcribe(audio_path)
+            print(result["text"].strip().lower())
+        except ImportError:
+            print("Whisper not available, audio extracted to: " + audio_path)
+    else:
+        print(f"Audio extraction failed: {{result.stderr}}")
+except Exception as e:
+    print(f"Error: {{e}}")
+'''
+        else:  # frames
+            code = f'''
+import subprocess
+import os
+
+try:
+    # Extract frames
+    frame_dir = "{local_path}_frames"
+    os.makedirs(frame_dir, exist_ok=True)
+    
+    result = subprocess.run([
+        'ffmpeg', '-i', "{local_path}", '-vf', 'fps=1', '-frames:v', '5',
+        f"{{frame_dir}}/frame_%03d.png", '-y'
+    ], capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        frames = os.listdir(frame_dir)
+        print(f"Extracted {{len(frames)}} frames:")
+        for f in sorted(frames):
+            print(f"  {{frame_dir}}/{{f}}")
+    else:
+        print(f"Frame extraction failed: {{result.stderr}}")
+except Exception as e:
+    print(f"Error: {{e}}")
+'''
+        
+        result = await sandbox.execute_code(code, timeout=120)
+        
+        if result.success:
+            return result.stdout.strip() or "No output from video analysis"
+        else:
+            return f"Video analysis failed: {result.stderr}"
+            
+    except Exception as e:
+        logger.error(f"Video analysis error: {e}")
+        return f"Error analyzing video: {e}"
+
+
+@quiz_agent.tool
+async def extract_archive(ctx: RunContext[QuizDependencies], url: str) -> str:
+    """
+    Download and extract any archive (zip, tar, tar.gz, 7z, rar).
+
+    Args:
+        url: URL of the archive file
+
+    Returns:
+        List of files and their contents
+    """
+    if not url.startswith('http'):
+        url = urljoin(ctx.deps.current_url, url)
+
+    logger.info(f"Extracting archive: {url}")
+
+    try:
+        local_path = await sandbox.download_file(url)
+        
+        code = f'''
+import os
+import tarfile
+import zipfile
+
+filepath = "{local_path}"
+extract_dir = filepath + "_extracted"
+os.makedirs(extract_dir, exist_ok=True)
+
+try:
+    # Try ZIP
+    if zipfile.is_zipfile(filepath):
+        with zipfile.ZipFile(filepath, 'r') as zf:
+            zf.extractall(extract_dir)
+            print("Extracted ZIP archive")
+    # Try TAR
+    elif tarfile.is_tarfile(filepath):
+        with tarfile.open(filepath, 'r:*') as tf:
+            tf.extractall(extract_dir)
+            print("Extracted TAR archive")
+    else:
+        print("Unknown archive format")
+        
+    # List contents
+    print("\\n=== Contents ===")
+    for root, dirs, files in os.walk(extract_dir):
+        for f in files:
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, extract_dir)
+            size = os.path.getsize(full_path)
+            print(f"{{rel_path}} ({{size}} bytes)")
+            
+            # Read text files
+            if size < 10000:
+                try:
+                    with open(full_path, 'r', encoding='utf-8') as file:
+                        content = file.read()
+                        print(f"--- Content of {{rel_path}} ---")
+                        print(content[:2000])
+                        if len(content) > 2000:
+                            print("... (truncated)")
+                except:
+                    pass
+except Exception as e:
+    print(f"Error: {{e}}")
+'''
+        
+        result = await sandbox.execute_code(code, timeout=60)
+        
+        if result.success:
+            return result.stdout.strip() or "Empty archive"
+        else:
+            return f"Archive extraction failed: {result.stderr}"
+            
+    except Exception as e:
+        logger.error(f"Archive extraction error: {e}")
+        return f"Error extracting archive: {e}"
 
 
 @quiz_agent.tool
@@ -639,6 +1172,12 @@ async def make_api_request(
     if not url.startswith('http'):
         url = urljoin(ctx.deps.current_url, url)
 
+    # Cache GET requests only
+    cache_key = f"api:{method}:{url}"
+    if method.upper() == "GET" and cache_key in ctx.deps.url_cache:
+        logger.info(f"Using cached API response for: {url}")
+        return ctx.deps.url_cache[cache_key]
+
     logger.info(f"API request: {method} {url}")
 
     try:
@@ -654,7 +1193,13 @@ async def make_api_request(
             )
 
             logger.info(f"API response: {response.status_code}")
-            return response.text
+            result = response.text
+            
+            # Cache successful GET requests
+            if method.upper() == "GET" and response.status_code == 200:
+                ctx.deps.url_cache[cache_key] = result
+            
+            return result
 
     except Exception as e:
         return f"API error: {e}"
@@ -789,59 +1334,120 @@ class QuizSolver:
         logger.info(f"Starting quiz solving for {context.email}")
         logger.info(f"Initial URL: {context.current_url}")
 
-        while not context.is_timed_out:
+        while True:
             try:
                 result = await self._solve_single_question(context)
                 context.results.append(result)
 
-                if result.correct and result.next_url:
-                    logger.info(f"Correct! Moving to next question: {result.next_url}")
-                    context.current_url = result.next_url
-                    context.attempt_number = 0
-                elif result.correct:
-                    logger.info("Quiz completed successfully!")
-                    break
-                else:
-                    context.attempt_number += 1
-                    if context.attempt_number >= settings.max_retries_per_question:
-                        logger.warning(f"Max retries reached for {context.current_url}")
+                if result.correct:
+                    if result.next_url:
+                        logger.info(f"Correct! Moving to next question: {result.next_url}")
+                        context.current_url = result.next_url
+                        context.attempt_number = 0
+                    else:
+                        logger.info("Quiz completed successfully!")
                         break
-                    logger.info(f"Retrying (attempt {context.attempt_number + 1})")
+                else:
+                    # Wrong answer - check if we should retry or move on
+                    reason = (result.message or "").lower()
+                    is_delay_timeout = "delay" in reason and "180" in reason
+                    
+                    if result.next_url:
+                        # Has next URL - decide whether to retry or move on
+                        if is_delay_timeout:
+                            logger.info(f"Delay timeout, moving to next: {result.next_url}")
+                            context.current_url = result.next_url
+                            context.attempt_number = 0
+                        else:
+                            # Wrong but not timeout - retry
+                            context.attempt_number += 1
+                            if context.attempt_number >= settings.max_retries_per_question:
+                                logger.warning(f"Max retries reached, moving to next: {result.next_url}")
+                                context.current_url = result.next_url
+                                context.attempt_number = 0
+                            else:
+                                logger.info(f"Wrong answer, retrying (attempt {context.attempt_number + 1}/{settings.max_retries_per_question})")
+                                context.results.pop()
+                                continue
+                    else:
+                        # No next URL
+                        if is_delay_timeout:
+                            logger.info("Delay timeout and no next URL, quiz ended")
+                            break
+                        # Retry without next URL
+                        context.attempt_number += 1
+                        if context.attempt_number >= settings.max_retries_per_question:
+                            logger.warning(f"Max retries reached, no next URL, quiz ended")
+                            break
+                        logger.info(f"Wrong answer, retrying (attempt {context.attempt_number + 1}/{settings.max_retries_per_question})")
+                        context.results.pop()
+                        continue
 
             except Exception as e:
                 logger.error(f"Error solving question: {e}", exc_info=True)
+                # On exception, try emergency submission to get next_url
+                try:
+                    emergency_result = await self._emergency_submit(context)
+                    context.results.append(emergency_result)
+                    if emergency_result.next_url:
+                        logger.info(f"Emergency submit got next URL: {emergency_result.next_url}")
+                        context.current_url = emergency_result.next_url
+                        context.attempt_number = 0
+                        continue
+                except Exception as e2:
+                    logger.error(f"Emergency submit also failed: {e2}")
+                
                 context.results.append(QuizResult(
                     url=context.current_url,
                     answer=None,
                     correct=False,
                     message=str(e)
                 ))
-                break
-
-        if context.is_timed_out:
-            logger.warning("Quiz timed out!")
+                context.attempt_number += 1
+                if context.attempt_number >= settings.max_retries_per_question:
+                    logger.warning(f"Max retries reached on error, stopping")
+                    break
 
         return context.results
+
+    async def _emergency_submit(self, context: QuizContext) -> QuizResult:
+        """Emergency submission to try to get a next_url when agent fails."""
+        url = context.current_url
+        parsed = urlparse(url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # Submit a placeholder answer to hopefully get next_url
+        response = await action.submit_answer(
+            endpoint=f"{base_url}/submit",
+            email=context.email,
+            secret=context.secret,
+            url=url,
+            answer="error_fallback"
+        )
+        
+        return QuizResult(
+            url=url,
+            answer="error_fallback",
+            correct=response.correct,
+            message=response.message or response.reason,
+            next_url=response.url
+        )
 
     async def _solve_single_question(self, context: QuizContext) -> QuizResult:
         url = context.current_url
         logger.info(f"Solving question: {url}")
-        page = None
-        for attempt in range(3):
-            try:
-                page = await vision.extract_page_content(url)
-                if page and page.text_content:
-                    break
-            except Exception as e:
-                logger.warning(f"Page extraction attempt {attempt + 1} failed: {e}")
-                await asyncio.sleep(1)
-
+        
+        # Fast page extraction - single attempt, no retries for speed
+        page = await vision.extract_page_content(url)
+        if not page or not page.text_content:
+            # One retry on failure
+            page = await vision.extract_page_content(url)
+        
         if not page:
             raise RuntimeError(f"Failed to extract page content from {url}")
 
-        logger.info(f"Page text: {page.text_content[:500]}...")
+        logger.info(f"Page text: {page.text_content[:300]}...")
         logger.info(f"Links: {page.links}")
-        logger.info(f"Vision submission endpoint: {page.submission_endpoint}")
 
         deps = QuizDependencies(
             email=context.email,
@@ -850,13 +1456,21 @@ class QuizSolver:
             page_content=page
         )
 
-        prompt = self._build_prompt(url, page, deps)
+        # Get guidance (fast, uses flash model)
+        guidance = await self._get_solution_guidance(page)
+        logger.info(f"Guidance: {guidance[:200] if guidance else 'none'}")
+
+        # Step 2: Build prompt with guidance and solve
+        prompt = self._build_prompt(url, page, deps, guidance)
 
         try:
             result = await quiz_agent.run(prompt, deps=deps)
             agent_answer = result.output
+            
+            # Post-process the answer
+            final_answer = self._postprocess_answer(agent_answer.answer, page.text_content)
 
-            logger.info(f"Agent result: answer={agent_answer.answer}, submission_url={agent_answer.submission_url}")
+            logger.info(f"Agent result: answer={final_answer}, submission_url={agent_answer.submission_url}")
 
             submission_endpoint = self._resolve_submission_url(agent_answer, page, deps)
 
@@ -865,12 +1479,12 @@ class QuizSolver:
                 email=context.email,
                 secret=context.secret,
                 url=url,
-                answer=agent_answer.answer
+                answer=final_answer
             )
 
             return QuizResult(
                 url=url,
-                answer=agent_answer.answer,
+                answer=final_answer,
                 correct=response.correct,
                 message=response.message or response.reason,
                 next_url=response.url
@@ -880,40 +1494,69 @@ class QuizSolver:
             logger.error(f"Agent failed: {e}", exc_info=True)
             return await self._fallback_solve(context, page, deps)
 
-    def _build_prompt(self, url: str, page: PageContent, deps: QuizDependencies) -> str:
-        links_formatted = (
-            "\n".join([f"  - {link}" for link in page.links])
-            if page.links else "  (no links found)"
-        )
+    def _postprocess_answer(self, answer: Any, page_text: str) -> Any:
+        """Post-process the answer to fix common issues."""
+        if not isinstance(answer, str):
+            return answer
+        
+        # Fix: Remove unnecessary quotes around URLs in command strings
+        # e.g., 'uv http get "https://..." -H' -> 'uv http get https://... -H'
+        if answer.startswith('uv http get "') or answer.startswith("uv http get '"):
+            # Remove quotes around the URL
+            answer = re.sub(r'^(uv http get )["\']([^"\']+)["\'](.*)$', r'\1\2\3', answer)
+            logger.info(f"Postprocess: removed quotes from uv command -> {answer}")
+        
+        return answer
 
-        return f"""Solve this quiz question.
+    async def _get_solution_guidance(self, page: PageContent) -> str:
+        """Get solution guidance from the guidance agent before solving."""
+        try:
+            guidance_prompt = f"""Analyze this quiz question and provide a brief solution strategy:
 
-=== CURRENT PAGE INFO ===
-URL: {url}
-Base URL: {deps.base_url}
-Email: {deps.email}
-
-=== PAGE CONTENT ===
+QUESTION:
 {page.text_content}
 
-=== AVAILABLE LINKS (ONLY use these for scraping) ===
+AVAILABLE FILES/LINKS:
+{page.links if page.links else "(none)"}
+
+Provide 3-5 bullet points on:
+- Problem type and approach
+- Tools needed (if any)
+- Key requirements/format rules
+- Potential gotchas
+"""
+            result = await guidance_agent.run(guidance_prompt)
+            return result.output
+        except Exception as e:
+            logger.warning(f"Guidance agent failed: {e}")
+            return ""
+
+    def _build_prompt(self, url: str, page: PageContent, deps: QuizDependencies, guidance: str = "") -> str:
+        links_formatted = (
+            "\n".join([f"  - {link}" for link in page.links])
+            if page.links else "  (none)"
+        )
+
+        guidance_section = ""
+        if guidance:
+            guidance_section = f"""
+SOLUTION STRATEGY (follow this guidance):
+{guidance}
+
+"""
+
+        return f"""Answer this question. DO NOT use tools unless the question requires downloading/analyzing a file.
+
+Email: {deps.email}
+{guidance_section}
+QUESTION:
+{page.text_content}
+
+AVAILABLE FILES (only use if question asks to download/analyze):
 {links_formatted}
 
-=== INSTRUCTIONS ===
-1. Read the page content above to understand what is being asked
-2. Find the submission URL from the links list (look for 'submit')
-3. If you need to scrape another page, use ONLY a URL from the links list above
-4. DO NOT guess or make up URLs - only use what's in the links list
-5. If working with a CSV file and a cutoff value:
-   - Download the file and read it
-   - Filter values greater than the cutoff
-   - Calculate the SUM of those values (NOT the count)
-6. Return your answer and the complete submission URL
-
-IMPORTANT:
-- The submission URL must be absolute like: {deps.base_url}/submit
-- When a cutoff is given with data, the answer is usually the SUM of values above the cutoff
-- Read the question carefully for COUNT vs SUM vs other operations
+Return your answer directly. For command questions, just return the command string with {deps.email} replacing <your email>.
+Set submission_url to: {deps.base_url}/submit
 """
 
     def _resolve_submission_url(
@@ -923,21 +1566,26 @@ IMPORTANT:
         deps: QuizDependencies
     ) -> str:
         """Resolve the submission URL from agent answer or fallbacks."""
-        submission_endpoint = agent_answer.submission_url
-
-        if not submission_endpoint or not submission_endpoint.startswith('http'):
-            if page.submission_endpoint:
-                submission_endpoint = page.submission_endpoint
-            else:
-                # Try to find submit link in page links
-                for link in page.links:
-                    if 'submit' in link.lower():
-                        submission_endpoint = link
-                        break
-                else:
-                    submission_endpoint = f"{deps.base_url}/submit"
-            logger.info(f"Using fallback submission endpoint: {submission_endpoint}")
-
+        submission_endpoint = None
+        
+        # Priority 1: Check if page has a specific submission endpoint (from vision)
+        if page.submission_endpoint and 'submit' in page.submission_endpoint.lower():
+            submission_endpoint = page.submission_endpoint
+            logger.info(f"Using vision submission endpoint: {submission_endpoint}")
+        
+        # Priority 2: Check links for submit endpoint
+        if not submission_endpoint and page.links:
+            for link in page.links:
+                if 'submit' in link.lower():
+                    submission_endpoint = link
+                    logger.info(f"Using submit link from page: {submission_endpoint}")
+                    break
+        
+        # Always use /submit endpoint - the "url = X" in questions refers to payload field, not endpoint
+        if not submission_endpoint:
+            submission_endpoint = f"{deps.base_url}/submit"
+            logger.info(f"Using /submit endpoint: {submission_endpoint}")
+        
         return submission_endpoint
 
     async def _fallback_solve(

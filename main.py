@@ -120,8 +120,7 @@ async def solve_quiz_task(task_id: str, email: str, secret: str, url: str):
         context = QuizContext(
             email=email,
             secret=secret,
-            current_url=url,
-            start_time=time.time()
+            current_url=url
         )
         
         agent = QuizAgent()
@@ -230,8 +229,7 @@ async def solve_quiz_sync(request: QuizStartRequest):
         context = QuizContext(
             email=request.email,
             secret=request.secret,
-            current_url=request.url,
-            start_time=time.time()
+            current_url=request.url
         )
         
         agent = QuizAgent()

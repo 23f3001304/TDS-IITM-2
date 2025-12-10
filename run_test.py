@@ -9,11 +9,11 @@ import json
 print("\nTesting endpoint...")
 try:
     response = httpx.post(
-        "https://quiz.animy.tech/start",
+        "http://127.0.0.1:8000/start",
         json={
-            "email": "test@example.com",
+            "email": "23f301035@ds.study.iitm.ac.in",
             "secret": "hemang156",
-            "url": "https://tds-llm-analysis.s-anand.net/demo"
+            "url": "https://tds-llm-analysis.s-anand.net/project2"
         },
         timeout=3000
     )

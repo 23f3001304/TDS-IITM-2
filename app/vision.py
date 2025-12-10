@@ -30,8 +30,15 @@ class VisionModule:
     """
     
     def __init__(self):
-        self.driver: Optional[webdriver.Chrome] = None
+        self._driver: Optional[webdriver.Chrome] = None
         self.executor = ThreadPoolExecutor(max_workers=2)
+        self._driver_lock = asyncio.Lock() if asyncio else None
+    
+    def _get_driver(self) -> webdriver.Chrome:
+        """Get or create Chrome WebDriver instance (reuse for speed)"""
+        if self._driver is None:
+            self._driver = self._create_driver()
+        return self._driver
     
     def _create_driver(self) -> webdriver.Chrome:
         """Create a new Chrome WebDriver instance"""
@@ -75,18 +82,18 @@ class VisionModule:
         """Synchronous page content extraction (runs in thread pool)"""
         driver = None
         try:
-            driver = self._create_driver()
-            logger.info(f"Loading URL with Selenium: {url}")
+            driver = self._get_driver()  # Reuse driver for speed
+            logger.info(f"Loading URL: {url}")
             driver.get(url)
             
-            # Wait for page to load and JS to execute
-            WebDriverWait(driver, 10).until(
+            # Wait for page to load - reduced timeout
+            WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             
-            # Give extra time for dynamic content (atob decoding, etc.)
+            # Minimal wait for JS execution (reduced from 2s)
             import time
-            time.sleep(2)
+            time.sleep(0.5)
             
             # Get rendered HTML after JS execution
             html_content = driver.page_source
@@ -127,19 +134,25 @@ class VisionModule:
             
         except TimeoutException:
             logger.warning(f"Timeout loading page: {url}")
+            self._reset_driver()  # Reset driver on timeout
             return self._fallback_extraction(url)
         except WebDriverException as e:
             logger.warning(f"WebDriver error: {e}, using fallback")
+            self._reset_driver()  # Reset driver on error
             return self._fallback_extraction(url)
         except Exception as e:
             logger.warning(f"Selenium failed: {e}, using fallback")
             return self._fallback_extraction(url)
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except:
-                    pass
+        # Don't quit driver - reuse it for next request
+    
+    def _reset_driver(self):
+        """Reset the driver on error"""
+        if self._driver:
+            try:
+                self._driver.quit()
+            except:
+                pass
+            self._driver = None
     
     def _find_submission_endpoint(self, soup: BeautifulSoup, text: str, base_url: str) -> Optional[str]:
         """Find the submission endpoint from the page content"""
@@ -255,6 +268,12 @@ class VisionModule:
     
     def shutdown(self):
         """Clean up resources"""
+        if self._driver:
+            try:
+                self._driver.quit()
+            except:
+                pass
+            self._driver = None
         self.executor.shutdown(wait=False)
 
 
