@@ -140,6 +140,8 @@ Format rules:
 - Numbers: just the number
 - Commands: exact string, no extra quotes
 - JSON: compact, match schema exactly
+- ISO-8601 dates: Use YYYY-MM-DD format (e.g., "2024-01-30"), NOT datetime with T00:00:00
+- CSV normalization: snake_case keys, dates as YYYY-MM-DD only, integers without spaces
 """
 
 GUIDANCE_PROMPT = """You are a quiz solution strategist. Analyze the question and provide a BRIEF solution strategy.
