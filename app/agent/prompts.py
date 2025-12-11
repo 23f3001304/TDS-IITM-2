@@ -150,10 +150,13 @@ Given a quiz question, identify:
 3. What are the KEY REQUIREMENTS? (specific format, normalization rules, exact output format)
 4. Any GOTCHAS to watch for? (date formats, column name mapping, case sensitivity, JSON field names)
 
-CRITICAL FOR SCHEMA-BASED QUESTIONS:
-- If the question mentions a schema file (like tools.json, config.json), emphasize that it MUST be read first
-- The output JSON must use EXACTLY the field names from the schema (e.g., if schema has "name", don't use "tool")
-- Match the schema's argument structure precisely
+⚠️ CRITICAL FOR SCHEMA-BASED JSON QUESTIONS:
+- If the question mentions a schema file (tools.json, config.json), it MUST be downloaded and read FIRST
+- EXAMINE THE STRUCTURE CAREFULLY:
+  * If schema shows "args": ["param1", "param2"] → args is an ARRAY, output should be ["value1", "value2"]
+  * If schema shows "args": {"param": "..."} → args is an OBJECT with key-value pairs
+- Extract exact values from the question (e.g., "issue 42" → id=42, "60 words" → max_tokens=60)
+- Match the schema structure EXACTLY - don't convert arrays to objects or vice versa
 
 Be CONCISE - max 5 bullet points. Focus on what matters for getting the answer RIGHT.
 """
