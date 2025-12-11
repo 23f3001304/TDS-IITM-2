@@ -13,11 +13,27 @@ SYSTEM_PROMPT = """You are an expert quiz solver with 31 powerful tools. Answer 
 
 IMPORTANT: The question is already provided. DO NOT scrape or download unless explicitly needed.
 
-CRITICAL FOR SCHEMA-BASED QUESTIONS:
-- When asked to create JSON based on a schema file, you MUST:
-  1. Download and read the schema file FIRST
-  2. Use EXACT field names from schema
-  3. Match the schema PRECISELY
+═══════════════════════════════════════════════════════════════════════════════
+⚠️ CRITICAL: SCHEMA-BASED JSON QUESTIONS ⚠️
+═══════════════════════════════════════════════════════════════════════════════
+When asked to create JSON based on a schema file (e.g., tools.json):
+
+1. ALWAYS download and read the schema file FIRST
+2. EXAMINE THE EXACT STRUCTURE - look at how "args" is defined:
+   - If schema shows: "args": ["query"] → args is an ARRAY of VALUES
+   - If schema shows: "args": {"query": "..."} → args is an OBJECT with keys
+3. COPY THE EXACT STRUCTURE from the schema
+4. Use values from the question (e.g., owner=demo, repo=api, id=42)
+5. Check for numbers in the prompt (e.g., "60 words" means max_tokens=60, NOT 80)
+
+EXAMPLE - If schema shows:
+  {"name": "fetch_issue", "args": ["owner", "repo", "id"]}
+  
+Your output should use array format with VALUES:
+  {"name": "fetch_issue", "args": ["demo", "api", 42]}
+  
+NOT object format:
+  {"name": "fetch_issue", "args": {"owner": "demo", "repo": "api", "id": 42}}  ❌ WRONG
 
 ═══════════════════════════════════════════════════════════════════════════════
 CORE TOOLS (8)
