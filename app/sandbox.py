@@ -1,25 +1,39 @@
+"""Sandbox module for safe code execution in isolated subprocesses."""
 import asyncio
 import os
 import subprocess
-import tempfile
 import uuid
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Final
 
+import httpx
 from loguru import logger
 
 from app.config import settings
 from app.models import CodeExecutionResult
 
 
+# Constants
+MAX_WORKERS: Final[int] = 4
+DOWNLOAD_TIMEOUT: Final[int] = 30
+SCRIPT_PREFIX: Final[str] = "script_"
+DEFAULT_FILENAME: Final[str] = "download"
+
+
 class ExecutionSandbox:
     """
     Executes Python code in an isolated subprocess with timeout protection.
+    
+    Attributes:
+        executor: Thread pool for async execution
+        temp_dir: Directory for temporary files
     """
     
-    def __init__(self):
-        self.executor = ThreadPoolExecutor(max_workers=4)
+    __slots__ = ('executor', 'temp_dir')
+    
+    def __init__(self) -> None:
+        self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
         self.temp_dir = Path(settings.temp_dir)
         self._ensure_temp_dir()
     

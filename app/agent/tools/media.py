@@ -1,10 +1,5 @@
-"""
-Media and Archive Tools
-- Audio transcription
-- Image analysis
-- Video analysis
-- Archive extraction
-"""
+"""Media analysis tools for audio, image, video, and archives."""
+from typing import Final, Literal
 from urllib.parse import urljoin
 
 from loguru import logger
@@ -13,6 +8,21 @@ from pydantic_ai import RunContext
 from app.agent.models import QuizDependencies
 from app.agent.prompts import quiz_agent
 from app.sandbox import sandbox
+
+
+# Constants
+AUDIO_SAMPLE_RATE: Final[int] = 16000
+MAX_CONTENT_LENGTH: Final[int] = 2000
+SUPPORTED_IMAGE_TASKS: Final[tuple[str, ...]] = ('ocr', 'describe', 'detect')
+SUPPORTED_VIDEO_TASKS: Final[tuple[str, ...]] = ('info', 'frames', 'audio')
+CODE_TIMEOUT: Final[int] = 120
+
+
+def _resolve_url(url: str, base_url: str) -> str:
+    """Resolve relative URL to absolute."""
+    if not url.startswith('http'):
+        return urljoin(base_url, url)
+    return url
 
 
 @quiz_agent.tool

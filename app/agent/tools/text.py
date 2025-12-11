@@ -1,10 +1,9 @@
-"""
-Text Processing and Encoding Tools
-"""
+"""Text processing, encoding, and pattern extraction tools."""
 import base64
 import hashlib
 import json
 import re
+from typing import Any, Callable, Dict, Final, List, Union
 from urllib.parse import quote, unquote
 
 from loguru import logger
@@ -12,6 +11,22 @@ from pydantic_ai import RunContext
 
 from app.agent.models import QuizDependencies
 from app.agent.prompts import quiz_agent
+
+
+# Hash algorithm mappings
+HASH_ALGORITHMS: Final[Dict[str, Callable[..., Any]]] = {
+    'md5': hashlib.md5,
+    'sha1': hashlib.sha1,
+    'sha256': hashlib.sha256,
+    'sha512': hashlib.sha512,
+}
+
+# Encoding operations
+ENCODING_OPERATIONS: Final[tuple[str, ...]] = (
+    'base64_encode', 'base64_decode',
+    'url_encode', 'url_decode', 
+    'hex_encode', 'hex_decode',
+)
 
 
 @quiz_agent.tool
@@ -27,17 +42,10 @@ def compute_hash(ctx: RunContext[QuizDependencies], text: str, algorithm: str = 
         Hexadecimal hash string
     """
     text_bytes = text.encode('utf-8')
-
-    algorithms = {
-        'md5': hashlib.md5,
-        'sha1': hashlib.sha1,
-        'sha256': hashlib.sha256,
-        'sha512': hashlib.sha512,
-    }
-
-    algo = algorithms.get(algorithm.lower())
+    algo = HASH_ALGORITHMS.get(algorithm.lower())
+    
     if not algo:
-        return f"Error: Unknown algorithm '{algorithm}'. Use: md5, sha1, sha256, sha512"
+        return f"Error: Unknown algorithm '{algorithm}'. Use: {', '.join(HASH_ALGORITHMS.keys())}"
 
     result = algo(text_bytes).hexdigest()
     logger.info(f"Hash ({algorithm}): {text[:50]}... -> {result}")
@@ -57,20 +65,19 @@ def encode_decode(ctx: RunContext[QuizDependencies], text: str, operation: str) 
         Encoded/decoded string
     """
     try:
-        if operation == "base64_encode":
-            return base64.b64encode(text.encode()).decode()
-        elif operation == "base64_decode":
-            return base64.b64decode(text).decode()
-        elif operation == "url_encode":
-            return quote(text)
-        elif operation == "url_decode":
-            return unquote(text)
-        elif operation == "hex_encode":
-            return text.encode().hex()
-        elif operation == "hex_decode":
-            return bytes.fromhex(text).decode()
-        else:
-            return f"Error: Unknown operation. Use: base64_encode/decode, url_encode/decode, hex_encode/decode"
+        operations: Dict[str, Callable[[str], str]] = {
+            'base64_encode': lambda t: base64.b64encode(t.encode()).decode(),
+            'base64_decode': lambda t: base64.b64decode(t).decode(),
+            'url_encode': quote,
+            'url_decode': unquote,
+            'hex_encode': lambda t: t.encode().hex(),
+            'hex_decode': lambda t: bytes.fromhex(t).decode(),
+        }
+        
+        if operation not in operations:
+            return f"Error: Unknown operation. Use: {', '.join(ENCODING_OPERATIONS)}"
+        
+        return operations[operation](text)
     except Exception as e:
         return f"Error: {e}"
 

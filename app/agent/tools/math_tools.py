@@ -1,15 +1,47 @@
-"""
-Math, Statistics, and Date/Time Tools
-"""
+"""Math, statistics, and date/time calculation tools."""
 import math
 import statistics
 from datetime import datetime, timedelta
+from typing import Any, Dict, Callable, Final
 
 from loguru import logger
 from pydantic_ai import RunContext
 
 from app.agent.models import QuizDependencies
 from app.agent.prompts import quiz_agent
+
+
+# Safe math functions available in expressions
+SAFE_MATH_FUNCTIONS: Final[Dict[str, Callable[..., Any]]] = {
+    'sqrt': math.sqrt,
+    'sin': math.sin,
+    'cos': math.cos,
+    'tan': math.tan,
+    'log': math.log,
+    'log10': math.log10,
+    'exp': math.exp,
+    'abs': abs,
+    'round': round,
+    'floor': math.floor,
+    'ceil': math.ceil,
+    'pow': pow,
+    'sum': sum,
+    'min': min,
+    'max': max,
+    'len': len,
+    'pi': math.pi,
+    'e': math.e,
+    'mean': statistics.mean,
+    'median': statistics.median,
+    'stdev': statistics.stdev,
+}
+
+# Supported date formats for parsing
+DATE_FORMATS: Final[tuple[str, ...]] = (
+    '%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y',
+    '%Y-%m-%d %H:%M:%S', '%d-%m-%Y',
+    '%B %d, %Y', '%b %d, %Y',
+)
 
 
 @quiz_agent.tool
@@ -24,32 +56,8 @@ def do_math(ctx: RunContext[QuizDependencies], expression: str) -> str:
     Returns:
         Result as string
     """
-    safe_dict = {
-        'sqrt': math.sqrt,
-        'sin': math.sin,
-        'cos': math.cos,
-        'tan': math.tan,
-        'log': math.log,
-        'log10': math.log10,
-        'exp': math.exp,
-        'abs': abs,
-        'round': round,
-        'floor': math.floor,
-        'ceil': math.ceil,
-        'pow': pow,
-        'sum': sum,
-        'min': min,
-        'max': max,
-        'len': len,
-        'pi': math.pi,
-        'e': math.e,
-        'mean': statistics.mean,
-        'median': statistics.median,
-        'stdev': statistics.stdev,
-    }
-
     try:
-        result = eval(expression, {"__builtins__": {}}, safe_dict)
+        result = eval(expression, {"__builtins__": {}}, SAFE_MATH_FUNCTIONS)
         logger.info(f"Math: {expression} = {result}")
         return str(result)
     except Exception as e:
@@ -72,13 +80,8 @@ def get_date_info(ctx: RunContext[QuizDependencies], date_string: str = "", oper
         if not date_string:
             dt = datetime.now()
         else:
-            formats = [
-                '%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y',
-                '%Y-%m-%d %H:%M:%S', '%d-%m-%Y',
-                '%B %d, %Y', '%b %d, %Y',
-            ]
             dt = None
-            for fmt in formats:
+            for fmt in DATE_FORMATS:
                 try:
                     dt = datetime.strptime(date_string, fmt)
                     break

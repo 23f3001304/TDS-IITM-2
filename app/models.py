@@ -1,13 +1,23 @@
-from pydantic import BaseModel, EmailStr, HttpUrl, Field
-from typing import Optional, Any
+"""Pydantic models for API requests, responses, and internal data."""
 from enum import Enum
+from typing import Any, Optional
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class QuizStartRequest(BaseModel):
-    """Request model for starting a quiz session"""
-    email: EmailStr
-    secret: str
-    url: str = Field(..., description="The quiz URL to solve")
+    """Request model for starting a quiz session."""
+    email: EmailStr = Field(..., description="Student email address")
+    secret: str = Field(..., min_length=1, description="Authentication secret")
+    url: str = Field(..., min_length=10, description="The quiz URL to solve")
+    
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Ensure URL is properly formatted."""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('URL must start with http:// or https://')
+        return v
 
 
 class QuizStartResponse(BaseModel):

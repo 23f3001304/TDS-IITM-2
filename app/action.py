@@ -1,21 +1,31 @@
-"""
-Action Module - The "Mouth"
-Handles submission of answers to the quiz server
-"""
+"""Action Module - Handles submission of answers to the quiz server."""
+from typing import Any, Final, Optional
+
 import httpx
-from typing import Any, Optional
 from loguru import logger
 
 from app.models import SubmissionPayload, SubmissionResponse
 
 
+# Constants
+SUBMISSION_TIMEOUT: Final[int] = 60
+CONTENT_TYPE_JSON: Final[str] = "application/json"
+
+
 class ActionModule:
     """
     Handles communication with the quiz server for answer submission.
+    
+    Uses connection pooling for efficient HTTP requests.
     """
     
-    def __init__(self):
-        self.client = httpx.AsyncClient(timeout=60, follow_redirects=True)
+    __slots__ = ('client',)
+    
+    def __init__(self) -> None:
+        self.client = httpx.AsyncClient(
+            timeout=SUBMISSION_TIMEOUT, 
+            follow_redirects=True
+        )
     
     async def submit_answer(
         self,

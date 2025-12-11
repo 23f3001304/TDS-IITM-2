@@ -1,9 +1,8 @@
-"""
-HTTP and API Tools
-"""
+"""HTTP request and API interaction tools."""
 import csv
 import io
 import json
+from typing import Any, Dict, Final, List, Optional
 from urllib.parse import urljoin
 
 import httpx
@@ -12,6 +11,19 @@ from pydantic_ai import RunContext
 
 from app.agent.models import QuizDependencies
 from app.agent.prompts import quiz_agent
+
+
+# Constants
+HTTP_TIMEOUT: Final[int] = 30
+BLOCKED_PATHS: Final[tuple[str, ...]] = ('/submit', '/answer')
+ALLOWED_METHODS: Final[tuple[str, ...]] = ('GET', 'POST', 'PUT', 'DELETE', 'PATCH')
+CSV_OPERATIONS: Final[tuple[str, ...]] = ('sum', 'count', 'mean', 'max', 'min', 'unique', 'filter_count', 'filter_sum', 'list')
+
+
+def _is_blocked_url(url: str) -> bool:
+    """Check if URL is blocked for direct access."""
+    url_lower = url.lower()
+    return any(path in url_lower for path in BLOCKED_PATHS)
 
 
 @quiz_agent.tool
@@ -35,7 +47,7 @@ async def make_api_request(
     Returns:
         Response body
     """
-    if '/submit' in url.lower():
+    if _is_blocked_url(url):
         logger.warning(f"Blocked submission attempt via make_api_request: {url}")
         return "ERROR: Do not use make_api_request for submissions. Just return the answer and it will be submitted automatically."
     

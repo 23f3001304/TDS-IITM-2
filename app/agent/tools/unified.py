@@ -1,5 +1,5 @@
 """
-Unified Advanced Tools - Consolidated functionality following OOP principles
+Unified Advanced Tools - Consolidated functionality following OOP principles.
 
 This module combines and consolidates tools from:
 - web.py (HTML parsing, links, tables, forms)
@@ -19,7 +19,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, ClassVar, Dict, Final, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -33,13 +33,26 @@ from app.sandbox import sandbox
 
 
 # =============================================================================
+# Constants
+# =============================================================================
+HTTP_TIMEOUT: Final[int] = 30
+BINARY_TIMEOUT: Final[int] = 60
+MAX_TABLE_ROWS: Final[int] = 20
+MAX_TABLES: Final[int] = 3
+MAX_LINKS: Final[int] = 50
+MAX_TEXT_LENGTH: Final[int] = 2000
+MAX_CSV_ROWS: Final[int] = 50
+MAX_XML_ELEMENTS: Final[int] = 50
+
+
+# =============================================================================
 # Helper Classes (OOP Foundation)
 # =============================================================================
 
 class ContentFetcher:
     """Handles URL fetching with caching and error handling."""
     
-    _cache: dict = {}
+    _cache: ClassVar[Dict[str, Tuple[str, str]]] = {}
     
     @classmethod
     async def fetch(cls, url: str, base_url: str = "") -> tuple[str, str]:
